@@ -1,0 +1,7 @@
+{
+  "graphs": {
+    "voice_agent": "graph.pipeline:pipeline"
+  },
+  "dependencies": ["."],
+  "env": ".env.studio"
+}

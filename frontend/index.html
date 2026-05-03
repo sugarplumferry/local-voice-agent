@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Local Voice Agent</title>
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div class="app">
+    <header>
+        <h1>Local Voice Agent</h1>
+        <p>Speak English — get instant feedback</p>
+    </header>
+
+    <div id="conversation" aria-live="polite" aria-label="Conversation"></div>
+
+    <div class="bottom-bar">
+        <!-- VU meter with draggable threshold marker -->
+        <div class="vu-wrap" id="vu-meter" aria-hidden="true">
+            <div id="threshold-marker" title="Drag to set threshold">
+                <span id="lbl-threshold">-25dB</span>
+            </div>
+        </div>
+
+        <div class="controls">
+            <span id="status">Ready</span>
+            <button id="btn-start" aria-label="Start listening" title="Start / Stop">
+                🎙
+            </button>
+            <span id="status-right">&nbsp;</span>
+        </div>
+
+        <div class="settings">
+            <div class="setting-item">
+                <label for="sl-silence">Silence</label>
+                <input type="range" id="sl-silence" min="300" max="1000" step="100" value="300" />
+                <span id="lbl-silence">300ms</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="audio-buffer.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

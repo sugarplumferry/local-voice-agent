@@ -1,0 +1,9 @@
+# Minimal deps for running the LangGraph pipeline locally (no Whisper/FastAPI needed)
+langgraph>=0.2.0
+langsmith>=0.1.77
+langchain-core>=0.2.0
+langchain-ollama>=0.1.0
+httpx>=0.27.0
+redis>=5.0.4
+pydantic-settings>=2.2.1
+python-dotenv>=1.0.1
