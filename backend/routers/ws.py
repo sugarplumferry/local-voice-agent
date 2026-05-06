@@ -22,6 +22,7 @@ import base64
 import json
 import logging
 import re
+import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -90,23 +91,25 @@ async def _send(ws: WebSocket, payload: dict) -> None:
 async def _handle_utterance(ws: WebSocket, wav_bytes: bytes, session_id: str) -> None:
     # ── 1. Streaming transcription ────────────────────────────────────────────
     full_text = ""
+    transcribe_start = time.perf_counter()
     try:
         async for segment in whisper_service.transcribe_streaming(
             wav_bytes, language=settings.whisper_language
         ):
             full_text += segment
-            await _send(ws,{"type": "transcript_update", "text": full_text.strip()})
+            await _send(ws, {"type": "transcript_update", "text": full_text.strip()})
     except Exception as exc:
         logger.exception("Transcription error")
-        await _send(ws,{"type": "error", "message": str(exc)})
+        await _send(ws, {"type": "error", "message": str(exc)})
         return
+    transcribe_elapsed = round(time.perf_counter() - transcribe_start, 4)
 
     full_text = full_text.strip()
     if not full_text:
-        await _send(ws,{"type": "done", "node_timings": {}})  # reset UI
+        await _send(ws, {"type": "done", "node_timings": {}})  # reset UI
         return
 
-    await _send(ws,{"type": "transcript", "text": full_text})
+    await _send(ws, {"type": "transcript", "text": full_text})
 
     # ── 2. LangGraph pipeline + sentence-level TTS ────────────────────────────
     messages = await _memory.get_relevant_messages(session_id, full_text)
@@ -116,7 +119,7 @@ async def _handle_utterance(ws: WebSocket, wav_bytes: bytes, session_id: str) ->
         "grammar_error": False,
         "feedback_text": None,
         "response_text": None,
-        "node_timings":  {},
+        "node_timings":  {"transcribe_node": transcribe_elapsed},
         "session_id":    session_id,
         "audio_output":  None,
         "skip_tts":      True,   # ws.py handles TTS per-sentence externally
@@ -124,74 +127,92 @@ async def _handle_utterance(ws: WebSocket, wav_bytes: bytes, session_id: str) ->
 
     accumulated: dict = {}
     sentence_buf = ""
+    tts_elapsed_total = 0.0
 
     # Ordered TTS queue: a single runner processes sentences in order so audio
     # chunks arrive at the client in the same sequence as the text.
     tts_queue: asyncio.Queue[str | None] = asyncio.Queue()
 
     async def _tts_runner():
+        nonlocal tts_elapsed_total
         while True:
             text = await tts_queue.get()
             if text is None:
                 break
             try:
+                t0 = time.perf_counter()
                 audio_bytes = await _speaches.text_to_speech(text)
+                tts_elapsed_total += time.perf_counter() - t0
                 b64 = base64.b64encode(audio_bytes).decode()
-                await _send(ws,{"type": "audio", "content": b64})
+                await _send(ws, {"type": "audio", "content": b64})
             except Exception:
                 logger.exception("TTS error for chunk: %r", text)
 
     tts_task = asyncio.create_task(_tts_runner())
 
     try:
-        async for event in pipeline.astream_events(initial_state, version="v2"):
-            kind = event["event"]
-            node = event.get("metadata", {}).get("langgraph_node", "")
+        try:
+            async for event in pipeline.astream_events(
+                initial_state,
+                version="v2",
+                config={"metadata": {"transcribe_s": transcribe_elapsed}},
+            ):
+                kind = event["event"]
+                node = event.get("metadata", {}).get("langgraph_node", "")
 
-            if kind == "on_chat_model_stream" and node == "llm_response_node":
-                content = getattr(event["data"]["chunk"], "content", None)
-                if content:
-                    await _send(ws,{"type": "token", "content": content})
-                    sentence_buf += content
-                    # Queue TTS for each completed sentence
-                    if _SENTENCE_END.search(sentence_buf.rstrip()):
-                        chunk = sentence_buf.strip()
-                        sentence_buf = ""
-                        if chunk:
-                            await tts_queue.put(chunk)
+                if kind == "on_chat_model_stream" and node == "llm_response_node":
+                    content = getattr(event["data"]["chunk"], "content", None)
+                    if content:
+                        await _send(ws, {"type": "token", "content": content})
+                        sentence_buf += content
+                        # Queue TTS for each completed sentence
+                        if _SENTENCE_END.search(sentence_buf.rstrip()):
+                            chunk = sentence_buf.strip()
+                            sentence_buf = ""
+                            if chunk:
+                                await tts_queue.put(chunk)
 
-            elif kind == "on_chain_end" and node:
-                output = event.get("data", {}).get("output", {})
-                if isinstance(output, dict):
-                    accumulated.update(output)
-                    # Send feedback immediately when feedback_node completes
-                    if node == "feedback_node":
-                        feedback = output.get("feedback_text")
-                        if feedback:
-                            await _send(ws,{"type": "feedback", "content": feedback})
+                elif kind == "on_chain_end" and node:
+                    output = event.get("data", {}).get("output", {})
+                    if isinstance(output, dict):
+                        accumulated.update(output)
+                        # Send feedback immediately when feedback_node completes
+                        if node == "feedback_node":
+                            feedback = output.get("feedback_text")
+                            if feedback:
+                                await _send(ws, {"type": "feedback", "content": feedback})
 
-    except Exception as exc:
-        logger.exception("Pipeline error")
-        await _send(ws,{"type": "error", "message": str(exc)})
+        except Exception as exc:
+            logger.exception("Pipeline error")
+            await _send(ws, {"type": "error", "message": str(exc)})
+            return
+
+        # Flush any remaining text that didn't end with punctuation
+        remaining = sentence_buf.strip()
+        if remaining:
+            await tts_queue.put(remaining)
+
+        # Signal TTS runner to stop and wait for all audio to be sent
         await tts_queue.put(None)
         await tts_task
-        return
 
-    # Flush any remaining text that didn't end with punctuation
-    remaining = sentence_buf.strip()
-    if remaining:
-        await tts_queue.put(remaining)
+        # ── 3. Post-pipeline ──────────────────────────────────────────────────
+        response_text = accumulated.get("response_text", "")
+        if response_text:
+            await _memory.add_turn(session_id, full_text, response_text)
 
-    # Signal TTS runner to stop and wait for all audio to be sent
-    await tts_queue.put(None)
-    await tts_task
+        node_timings = accumulated.get("node_timings", {})
+        node_timings["tts_node"] = round(tts_elapsed_total, 4)
 
-    # ── 3. Post-pipeline ──────────────────────────────────────────────────────
-    response_text = accumulated.get("response_text", "")
-    if response_text:
-        await _memory.add_turn(session_id, full_text, response_text)
+        await _send(ws, {
+            "type":         "done",
+            "node_timings": node_timings,
+        })
 
-    await _send(ws,{
-        "type":         "done",
-        "node_timings": accumulated.get("node_timings", {}),
-    })
+    finally:
+        if not tts_task.done():
+            tts_task.cancel()
+            try:
+                await tts_task
+            except asyncio.CancelledError:
+                pass

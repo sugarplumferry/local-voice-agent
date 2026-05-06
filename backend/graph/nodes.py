@@ -3,7 +3,6 @@ import time
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
-from langsmith import traceable
 
 from config import settings
 from services.speaches import SpeachesService
@@ -32,10 +31,12 @@ def _build_chat_messages(state: AgentState) -> list:
 
 # ---------------------------------------------------------------------------
 # Node 1 – transcribe_node
-# Receives already-transcribed text; exists as an explicit tracing boundary.
+# If the caller pre-timed Whisper (e.g. ws.py streaming STT), the elapsed
+# seconds are already in state["node_timings"]["transcribe_node"] — keep them.
 # ---------------------------------------------------------------------------
-@traceable(name="transcribe_node")
 async def transcribe_node(state: AgentState) -> dict:
+    if "transcribe_node" in state["node_timings"]:
+        return {}
     start = time.perf_counter()
     return {
         "node_timings": {
@@ -49,7 +50,6 @@ async def transcribe_node(state: AgentState) -> dict:
 # Node 2 – grammar_check_node
 # Asks the LLM to decide YES/NO; sets grammar_error flag.
 # ---------------------------------------------------------------------------
-@traceable(name="grammar_check_node")
 async def grammar_check_node(state: AgentState) -> dict:
     start = time.perf_counter()
     has_error = False
@@ -84,7 +84,6 @@ async def grammar_check_node(state: AgentState) -> dict:
 # Generates the main conversational reply via Ollama (streaming internally).
 # astream_events() at the graph level will surface on_chat_model_stream events.
 # ---------------------------------------------------------------------------
-@traceable(name="llm_response_node")
 async def llm_response_node(state: AgentState) -> dict:
     start = time.perf_counter()
     llm = ChatOllama(
@@ -107,7 +106,6 @@ async def llm_response_node(state: AgentState) -> dict:
 # Node 4 – feedback_node  (only reached when grammar_error is True)
 # Generates a one-sentence friendly grammar correction.
 # ---------------------------------------------------------------------------
-@traceable(name="feedback_node")
 async def feedback_node(state: AgentState) -> dict:
     start = time.perf_counter()
     llm = ChatOllama(
@@ -134,12 +132,13 @@ async def feedback_node(state: AgentState) -> dict:
 # ---------------------------------------------------------------------------
 # Node 5 – tts_node
 # Sends the final text to Speaches TTS and stores base64-encoded audio.
+# When skip_tts=True (ws.py handles TTS externally), timing is injected by
+# the caller after _tts_runner completes — don't overwrite it here.
 # ---------------------------------------------------------------------------
-@traceable(name="tts_node")
 async def tts_node(state: AgentState) -> dict:
-    start = time.perf_counter()
     audio_b64: str | None = None
     if not state.get("skip_tts"):
+        start = time.perf_counter()
         try:
             text = state.get("response_text") or ""
             if state.get("feedback_text"):
@@ -148,11 +147,12 @@ async def tts_node(state: AgentState) -> dict:
             audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
         except Exception:
             pass  # audio is optional; the text response is still usable
+        return {
+            "audio_output": audio_b64,
+            "node_timings": {
+                **state["node_timings"],
+                "tts_node": round(time.perf_counter() - start, 4),
+            },
+        }
 
-    return {
-        "audio_output": audio_b64,
-        "node_timings": {
-            **state["node_timings"],
-            "tts_node": round(time.perf_counter() - start, 4),
-        },
-    }
+    return {"audio_output": audio_b64}

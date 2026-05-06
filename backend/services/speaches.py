@@ -1,6 +1,7 @@
 import logging
 
 import httpx
+from langsmith import traceable
 
 from config import settings
 
@@ -15,6 +16,7 @@ class SpeachesService:
         self.tts_model = settings.tts_model
         self.tts_voice = settings.tts_voice
 
+    @traceable(name="tts_speaches")
     async def text_to_speech(self, text: str) -> bytes:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
