@@ -1,5 +1,6 @@
 # Environment — never commit real keys
 .env
+backend/.env.studio
 
 # Python
 __pycache__/

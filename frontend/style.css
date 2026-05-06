@@ -98,6 +98,10 @@ header p {
 
 .msg .body { white-space: pre-wrap; word-break: break-word; }
 
+.msg .body .preview { opacity: 0.5; font-style: italic; }
+
+.msg.agent.interrupted { opacity: 0.35; }
+
 /* Feedback bubble */
 .msg.feedback {
     background: var(--feedback);
