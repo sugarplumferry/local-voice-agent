@@ -1,5 +1,9 @@
-from typing import Optional
+from typing import Annotated, Optional
 from typing_extensions import TypedDict
+
+
+def _merge_dicts(a: dict, b: dict) -> dict:
+    return {**a, **b}
 
 
 class AgentState(TypedDict):
@@ -13,8 +17,8 @@ class AgentState(TypedDict):
     feedback_text: Optional[str]
     # LLM response text
     response_text: Optional[str]
-    # Per-node elapsed seconds, e.g. {"transcribe_node": 0.002, ...}
-    node_timings: dict[str, float]
+    # Per-node elapsed seconds — Annotated so parallel nodes can both update it
+    node_timings: Annotated[dict[str, float], _merge_dicts]
     # Redis session identifier
     session_id: str
     # Base64-encoded WAV audio from TTS (None if TTS was skipped/failed)
