@@ -190,8 +190,9 @@ async def _handle_utterance(
 
     accumulated: dict = {}
     sentence_buf = ""
-    response_acc = ""      # full accumulator for GRAMMAR: marker detection
-    reply_done = False     # True once the GRAMMAR: marker is detected
+    response_acc = ""      # full accumulator; tracks every token from the model
+    committed_len = 0      # chars of response_acc already forwarded to the client
+    reply_done = False     # True once the GRAMMAR: marker is fully detected
     tts_elapsed_total = 0.0
 
     # Ordered TTS queue: a single runner processes sentences in order so audio
@@ -226,35 +227,41 @@ async def _handle_utterance(
                 if kind == "on_chat_model_stream" and node == "llm_response_node":
                     content = getattr(event["data"]["chunk"], "content", None)
                     if content and not reply_done:
-                        prev_len = len(response_acc)
                         response_acc += content
 
                         marker_pos = response_acc.find(GRAMMAR_MARKER)
                         if marker_pos >= 0:
-                            # GRAMMAR: marker found — send only the clean prefix
+                            # Marker fully present — commit only the clean prefix
                             reply_done = True
-                            safe_end = marker_pos          # absolute cut-off
-                            new_safe = response_acc[prev_len:safe_end]
-                            if new_safe:
-                                await _send(ws, {"type": "token", "content": new_safe})
-                                sentence_buf += new_safe
-                            # Strip any partial marker prefix already in sentence_buf
-                            for trim in range(len(GRAMMAR_MARKER), 0, -1):
-                                if sentence_buf.endswith(GRAMMAR_MARKER[:trim]):
-                                    sentence_buf = sentence_buf[:-trim]
-                                    break
-                            # Flush remaining clean response text to TTS
-                            if sentence_buf.strip():
-                                await tts_queue.put(sentence_buf.strip())
-                                sentence_buf = ""
+                            to_send = response_acc[committed_len:marker_pos]
                         else:
-                            await _send(ws, {"type": "token", "content": content})
-                            sentence_buf += content
+                            # Hold back the last (marker_len-1) chars; they might be
+                            # the start of a marker that completes in the next chunk.
+                            safe_end = max(
+                                committed_len,
+                                len(response_acc) - len(GRAMMAR_MARKER) + 1,
+                            )
+                            to_send = response_acc[committed_len:safe_end]
+                            committed_len = safe_end
+
+                        if to_send:
+                            await _send(ws, {"type": "token", "content": to_send})
+                            sentence_buf += to_send
                             if _SENTENCE_END.search(sentence_buf.rstrip()):
                                 chunk = sentence_buf.strip()
                                 sentence_buf = ""
                                 if chunk:
                                     await tts_queue.put(chunk)
+
+                        if reply_done:
+                            # Trim any partial marker prefix left in sentence_buf
+                            for trim in range(len(GRAMMAR_MARKER), 0, -1):
+                                if sentence_buf.endswith(GRAMMAR_MARKER[:trim]):
+                                    sentence_buf = sentence_buf[:-trim]
+                                    break
+                            if sentence_buf.strip():
+                                await tts_queue.put(sentence_buf.strip())
+                                sentence_buf = ""
 
                 elif kind == "on_chain_end" and node:
                     output = event.get("data", {}).get("output", {})
@@ -270,6 +277,12 @@ async def _handle_utterance(
             logger.exception("Pipeline error")
             await _send(ws, {"type": "error", "message": str(exc)})
             return
+
+        # Release any chars held back in the safety buffer (no marker found)
+        if not reply_done and committed_len < len(response_acc):
+            leftover = response_acc[committed_len:]
+            await _send(ws, {"type": "token", "content": leftover})
+            sentence_buf += leftover
 
         # Flush any remaining response text that didn't end with punctuation
         remaining = sentence_buf.strip()
