@@ -54,8 +54,9 @@ class WhisperService:
     def _do_transcribe(self, audio_bytes: bytes, language: str | None) -> str:
         segments, _ = self._model.transcribe(
             io.BytesIO(audio_bytes),
-            beam_size=5,
+            beam_size=1,
             language=language,
+            vad_filter=True,
         )
         return " ".join(s.text for s in segments).strip()
 
@@ -70,7 +71,7 @@ class WhisperService:
         def _run() -> None:
             try:
                 segments, _ = self._model.transcribe(
-                    io.BytesIO(audio_bytes), beam_size=5, language=language
+                    io.BytesIO(audio_bytes), beam_size=1, language=language, vad_filter=True
                 )
                 for seg in segments:
                     loop.call_soon_threadsafe(q.put_nowait, ("seg", seg.text))
