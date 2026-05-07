@@ -108,9 +108,12 @@ async def grammar_check_node(state: AgentState, config: RunnableConfig) -> dict:
 async def llm_response_node(state: AgentState, config: RunnableConfig) -> dict:
     start = time.perf_counter()
     llm = _get_llm(config, temperature=0.7, streaming=True)
-    response = await llm.ainvoke(_build_chat_messages(state))
+    chunks: list[str] = []
+    async for chunk in llm.astream(_build_chat_messages(state), config=config):
+        if chunk.content:
+            chunks.append(chunk.content)
     return {
-        "response_text": response.content,
+        "response_text": "".join(chunks),
         "node_timings": {
             **state["node_timings"],
             "llm_response_node": round(time.perf_counter() - start, 4),
