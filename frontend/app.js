@@ -16,6 +16,18 @@ const SESSION_ID    = typeof crypto.randomUUID === "function"
     });
 const VU_BARS       = 24;
 const INTERRUPT_TICKS = 6;   // × ~29 ms per tick ≈ 174 ms sustained speech
+const SETTINGS_KEY  = "voice_agent_settings";
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+
+function _defaultSettings() {
+    return { openai_api_key: "", stt: "local", tts: "local", tts_voice: "alloy", llm: "local", llm_model: "gpt-4o-mini" };
+}
+
+let currentSettings = (() => {
+    try { return { ..._defaultSettings(), ...JSON.parse(localStorage.getItem(SETTINGS_KEY)) }; }
+    catch { return _defaultSettings(); }
+})();
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -244,7 +256,7 @@ function connectWS() {
     ws = new WebSocket(BACKEND_WS);
     ws.onopen  = () => {
         console.log(`[WS] connected  session=${SESSION_ID}`);
-        ws.send(JSON.stringify({ type: "init_session", session_id: SESSION_ID }));
+        ws.send(JSON.stringify({ type: "init_session", session_id: SESSION_ID, settings: currentSettings }));
         setStatus("Listening…");
     };
     ws.onmessage = ({ data }) => onWSMessage(JSON.parse(data));
@@ -257,8 +269,9 @@ function connectWS() {
 
 // ── Worklet messages ──────────────────────────────────────────────────────────
 
-let activeUserEl  = null;
-let activeAgentEl = null;
+let activeUserEl        = null;
+let activeAgentEl       = null;
+let _transcriptFinalized = false;   // true after "transcript" msg, reset on fresh turn / done
 
 function onWorkletMessage({ data }) {
     if (data.type === "db") {
@@ -288,9 +301,9 @@ function onWorkletMessage({ data }) {
             }
         }
 
-        if (activeUserEl) {
-            // Continuing turn — flush any in-progress animation so the body
-            // is up-to-date before the backend re-processes the combined audio.
+        if (activeUserEl && !_transcriptFinalized) {
+            // Continuing turn — VAD fired again before the backend confirmed the
+            // transcript.  Combine audio and re-send so Whisper gets full context.
             console.log(`[VAD] continuing turn  +${float32.length} samples  total=${(turnPcm?.length ?? 0) + float32.length}`);
             typer.flush();
             _resetLive();
@@ -311,11 +324,22 @@ function onWorkletMessage({ data }) {
                 activeAgentEl.classList.add("interrupted");
             }
         } else {
-            // Fresh turn — empty body; live-region animation will fill it
+            // Fresh turn — user spoke after transcript was finalized (agent was
+            // already responding) or this is the very first utterance.
             console.log(`[VAD] fresh turn  ${float32.length} samples`);
+            typer.flush();
+            _resetLive();
+            _transcriptFinalized = false;
+
+            if (activeAgentEl) {
+                // Interrupt the in-progress agent response and leave it dimmed
+                activeAgentEl.querySelector(".body").classList.remove("cursor");
+                activeAgentEl.classList.add("interrupted");
+                activeAgentEl = null;
+            }
+
             turnPcm      = float32;
             activeUserEl = appendMsg("user", "");
-            activeAgentEl = null;
         }
 
         const wavBuf = float32ToWav(turnPcm, audioCtx.sampleRate);
@@ -399,6 +423,7 @@ function onWSMessage(msg) {
             }
 
             _resetLive();
+            _transcriptFinalized = true;
 
             if (!activeAgentEl) {
                 activeAgentEl = appendMsg("agent", "", true);
@@ -443,9 +468,10 @@ function onWSMessage(msg) {
                 activeUserEl.remove();
                 console.log("[UI] removed empty user bubble (empty transcript)");
             }
-            activeUserEl  = null;
-            activeAgentEl = null;
-            turnPcm       = null;
+            activeUserEl         = null;
+            activeAgentEl        = null;
+            turnPcm              = null;
+            _transcriptFinalized = false;
             setStatus(isListening ? "Listening…" : "Ready");
             break;
 
@@ -524,3 +550,65 @@ function scrollBottom() {
 }
 
 function setStatus(msg) { statusEl.textContent = msg; }
+
+// ── Settings modal ────────────────────────────────────────────────────────────
+
+const modalEl        = document.getElementById("modal-settings");
+const btnSettings    = document.getElementById("btn-settings");
+const btnModalClose  = document.getElementById("btn-modal-close");
+const btnSave        = document.getElementById("btn-save-settings");
+const cfgApiKey      = document.getElementById("cfg-api-key");
+const cfgTtsVoice    = document.getElementById("cfg-tts-voice");
+const cfgLlmModel    = document.getElementById("cfg-llm-model");
+const ttsVoiceRow    = document.getElementById("tts-voice-row");
+const llmModelRow    = document.getElementById("llm-model-row");
+
+function _openModal() {
+    // Populate fields from currentSettings
+    cfgApiKey.value = currentSettings.openai_api_key || "";
+    document.querySelector(`input[name="stt"][value="${currentSettings.stt}"]`).checked = true;
+    document.querySelector(`input[name="tts"][value="${currentSettings.tts}"]`).checked = true;
+    document.querySelector(`input[name="llm"][value="${currentSettings.llm}"]`).checked = true;
+    cfgTtsVoice.value = currentSettings.tts_voice || "alloy";
+    cfgLlmModel.value = currentSettings.llm_model || "gpt-4o-mini";
+    _updateSubSettings();
+    modalEl.classList.remove("hidden");
+    cfgApiKey.focus();
+}
+
+function _closeModal() { modalEl.classList.add("hidden"); }
+
+function _updateSubSettings() {
+    const ttsOpenAI = document.querySelector('input[name="tts"]:checked')?.value === "openai";
+    const llmOpenAI = document.querySelector('input[name="llm"]:checked')?.value === "openai";
+    ttsVoiceRow.classList.toggle("hidden", !ttsOpenAI);
+    llmModelRow.classList.toggle("hidden", !llmOpenAI);
+}
+
+function _saveSettings() {
+    const s = {
+        openai_api_key: cfgApiKey.value.trim(),
+        stt:       document.querySelector('input[name="stt"]:checked').value,
+        tts:       document.querySelector('input[name="tts"]:checked').value,
+        tts_voice: cfgTtsVoice.value,
+        llm:       document.querySelector('input[name="llm"]:checked').value,
+        llm_model: cfgLlmModel.value,
+    };
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+    currentSettings = s;
+    _closeModal();
+}
+
+btnSettings.addEventListener("click", _openModal);
+btnModalClose.addEventListener("click", _closeModal);
+btnSave.addEventListener("click", _saveSettings);
+
+// Close on backdrop click
+modalEl.querySelector(".modal-backdrop").addEventListener("click", _closeModal);
+
+// Close on Escape
+document.addEventListener("keydown", e => { if (e.key === "Escape") _closeModal(); });
+
+// Show/hide sub-settings when provider radios change
+document.querySelectorAll('input[name="tts"], input[name="llm"]')
+    .forEach(r => r.addEventListener("change", _updateSubSettings));
