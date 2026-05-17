@@ -21,7 +21,16 @@ const SETTINGS_KEY  = "voice_agent_settings";
 // ── Settings ──────────────────────────────────────────────────────────────────
 
 function _defaultSettings() {
-    return { openai_api_key: "", stt: "local", tts: "local", tts_voice: "alloy", llm: "local", llm_model: "gpt-4o-mini" };
+    return {
+        openai_api_key: "",
+        groq_api_key:   "",
+        stt:        "local",
+        tts:        "local",
+        tts_voice:  "alloy",
+        llm:        "local",
+        llm_model:  "gpt-4o-mini",
+        groq_model: "llama-3.3-70b-versatile",
+    };
 }
 
 let currentSettings = (() => {
@@ -558,19 +567,24 @@ const btnSettings    = document.getElementById("btn-settings");
 const btnModalClose  = document.getElementById("btn-modal-close");
 const btnSave        = document.getElementById("btn-save-settings");
 const cfgApiKey      = document.getElementById("cfg-api-key");
+const cfgGroqKey     = document.getElementById("cfg-groq-key");
 const cfgTtsVoice    = document.getElementById("cfg-tts-voice");
 const cfgLlmModel    = document.getElementById("cfg-llm-model");
+const cfgGroqModel   = document.getElementById("cfg-groq-model");
 const ttsVoiceRow    = document.getElementById("tts-voice-row");
 const llmModelRow    = document.getElementById("llm-model-row");
+const groqModelRow   = document.getElementById("groq-model-row");
 
 function _openModal() {
     // Populate fields from currentSettings
-    cfgApiKey.value = currentSettings.openai_api_key || "";
+    cfgApiKey.value  = currentSettings.openai_api_key || "";
+    cfgGroqKey.value = currentSettings.groq_api_key   || "";
     document.querySelector(`input[name="stt"][value="${currentSettings.stt}"]`).checked = true;
     document.querySelector(`input[name="tts"][value="${currentSettings.tts}"]`).checked = true;
     document.querySelector(`input[name="llm"][value="${currentSettings.llm}"]`).checked = true;
-    cfgTtsVoice.value = currentSettings.tts_voice || "alloy";
-    cfgLlmModel.value = currentSettings.llm_model || "gpt-4o-mini";
+    cfgTtsVoice.value  = currentSettings.tts_voice  || "alloy";
+    cfgLlmModel.value  = currentSettings.llm_model  || "gpt-4o-mini";
+    cfgGroqModel.value = currentSettings.groq_model || "llama-3.3-70b-versatile";
     _updateSubSettings();
     modalEl.classList.remove("hidden");
     cfgApiKey.focus();
@@ -580,35 +594,14 @@ function _closeModal() { modalEl.classList.add("hidden"); }
 
 function _updateSubSettings() {
     const ttsOpenAI = document.querySelector('input[name="tts"]:checked')?.value === "openai";
-    const llmOpenAI = document.querySelector('input[name="llm"]:checked')?.value === "openai";
+    const llmChoice = document.querySelector('input[name="llm"]:checked')?.value;
     ttsVoiceRow.classList.toggle("hidden", !ttsOpenAI);
-    llmModelRow.classList.toggle("hidden", !llmOpenAI);
+    llmModelRow.classList.toggle("hidden",  llmChoice !== "openai");
+    groqModelRow.classList.toggle("hidden", llmChoice !== "groq");
 }
 
 function _saveSettings() {
     const s = {
         openai_api_key: cfgApiKey.value.trim(),
-        stt:       document.querySelector('input[name="stt"]:checked').value,
-        tts:       document.querySelector('input[name="tts"]:checked').value,
-        tts_voice: cfgTtsVoice.value,
-        llm:       document.querySelector('input[name="llm"]:checked').value,
-        llm_model: cfgLlmModel.value,
-    };
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
-    currentSettings = s;
-    _closeModal();
-}
-
-btnSettings.addEventListener("click", _openModal);
-btnModalClose.addEventListener("click", _closeModal);
-btnSave.addEventListener("click", _saveSettings);
-
-// Close on backdrop click
-modalEl.querySelector(".modal-backdrop").addEventListener("click", _closeModal);
-
-// Close on Escape
-document.addEventListener("keydown", e => { if (e.key === "Escape") _closeModal(); });
-
-// Show/hide sub-settings when provider radios change
-document.querySelectorAll('input[name="tts"], input[name="llm"]')
-    .forEach(r => r.addEventListener("change", _updateSubSettings));
+        groq_api_key:   cfgGroqKey.value.trim(),
+        stt:        document.querySelector('input[nam

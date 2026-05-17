@@ -54,10 +54,14 @@
         </div>
 
         <div class="modal-body">
-            <!-- OpenAI API Key -->
+            <!-- API Keys -->
             <div class="setting-group">
                 <label class="setting-label" for="cfg-api-key">OpenAI API Key</label>
                 <input type="password" id="cfg-api-key" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="setting-group">
+                <label class="setting-label" for="cfg-groq-key">Groq API Key</label>
+                <input type="password" id="cfg-groq-key" placeholder="gsk_..." autocomplete="off" spellcheck="false" />
             </div>
 
             <hr class="modal-divider" />
@@ -115,6 +119,10 @@
                         <input type="radio" name="llm" value="openai" />
                         <span>OpenAI</span>
                     </label>
+                    <label class="radio-label">
+                        <input type="radio" name="llm" value="groq" />
+                        <span>Groq</span>
+                    </label>
                 </div>
                 <div class="sub-setting" id="llm-model-row">
                     <label for="cfg-llm-model">Model</label>
@@ -122,20 +130,4 @@
                         <option value="gpt-4o-mini">gpt-4o-mini</option>
                         <option value="gpt-4o">gpt-4o</option>
                         <option value="gpt-4.1-mini">gpt-4.1-mini</option>
-                        <option value="gpt-4.1">gpt-4.1</option>
-                    </select>
-                </div>
-            </div>
-        </div>
-
-        <div class="modal-footer">
-            <small id="modal-hint">Changes take effect on next recording start.</small>
-            <button id="btn-save-settings">Save</button>
-        </div>
-    </div>
-</div>
-
-<script src="audio-buffer.js"></script>
-<script src="app.js"></script>
-</body>
-</html>
+      

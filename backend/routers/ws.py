@@ -56,6 +56,7 @@ _SENTENCE_END = re.compile(r'[.!?]["\')]*\s*$')
 def _build_providers(user_settings: dict) -> dict:
     """Return {stt_service, tts_service, pipeline_config} based on user settings."""
     api_key = (user_settings.get("openai_api_key") or "").strip()
+    groq_key = (user_settings.get("groq_api_key") or "").strip()
 
     # STT
     if user_settings.get("stt") == "openai" and api_key:
@@ -73,11 +74,18 @@ def _build_providers(user_settings: dict) -> dict:
 
     # LLM — passed via LangGraph configurable
     pipeline_config: dict = {"metadata": {}}
-    if user_settings.get("llm") == "openai" and api_key:
+    llm_choice = user_settings.get("llm", "local")
+    if llm_choice == "openai" and api_key:
         pipeline_config["configurable"] = {
             "llm_provider": "openai",
             "openai_api_key": api_key,
             "llm_model": user_settings.get("llm_model", "gpt-4o-mini"),
+        }
+    elif llm_choice == "groq" and groq_key:
+        pipeline_config["configurable"] = {
+            "llm_provider": "groq",
+            "groq_api_key": groq_key,
+            "llm_model": user_settings.get("groq_model", "llama-3.3-70b-versatile"),
         }
 
     return {"stt": stt_service, "tts": tts_service, "pipeline_config": pipeline_config}
@@ -284,32 +292,4 @@ async def _handle_utterance(
             await _send(ws, {"type": "token", "content": leftover})
             sentence_buf += leftover
 
-        # Flush any remaining response text that didn't end with punctuation
-        remaining = sentence_buf.strip()
-        if remaining and not reply_done:
-            await tts_queue.put(remaining)
-
-        # Signal TTS runner to stop and wait for all audio to be sent
-        await tts_queue.put(None)
-        await tts_task
-
-        # ── 3. Post-pipeline ──────────────────────────────────────────────────
-        response_text = accumulated.get("response_text", "")
-        if response_text:
-            await _memory.add_turn(session_id, full_text, response_text)
-
-        node_timings = accumulated.get("node_timings", {})
-        node_timings["tts_node"] = round(tts_elapsed_total, 4)
-
-        await _send(ws, {
-            "type":         "done",
-            "node_timings": node_timings,
-        })
-
-    finally:
-        if not tts_task.done():
-            tts_task.cancel()
-            try:
-                await tts_task
-            except asyncio.CancelledError:
-                pass
+        # Flush any remaining response text that didn't end with punctuati
