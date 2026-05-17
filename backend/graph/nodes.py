@@ -1,3 +1,5 @@
+import asyncio
+import logging
 import time
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -7,6 +9,35 @@ from langchain_ollama import ChatOllama
 from config import settings
 from services.speaches import SpeachesService
 from .state import AgentState
+
+logger = logging.getLogger(__name__)
+
+# Retry budget for LLM streaming. Voice has tighter latency than chat so we keep
+# retries small. Production should make these configurable per-provider.
+LLM_MAX_ATTEMPTS = 3
+LLM_BACKOFF_BASE_SEC = 0.5
+
+
+def _classify_llm_error(exc: BaseException) -> str:
+    """Return 'transient' | 'rate_limit' | 'hard'.
+
+    Same pattern as OpenClaw's classifyCompactionReason: rather than `try/except`
+    blindly retrying, look at the error and pick the right policy.
+    """
+    msg = str(exc).lower()
+    status = getattr(exc, "status_code", None) or getattr(exc, "http_status", None)
+    if status == 429 or "rate limit" in msg or "too many requests" in msg:
+        return "rate_limit"
+    if status and 400 <= int(status) < 500 and status != 429:
+        # 4xx (auth, bad request, content-policy) is rarely fixed by retry
+        return "hard"
+    if isinstance(exc, asyncio.CancelledError):
+        return "hard"  # user barge-in / shutdown — do not retry
+    if "tool_use_failed" in msg:
+        # Groq Llama: model emitted raw text instead of structured tool call.
+        # Worth retrying — next sample may parse cleanly.
+        return "transient"
+    return "transient"  # default: network/5xx/timeout
 
 _speaches = SpeachesService()
 
