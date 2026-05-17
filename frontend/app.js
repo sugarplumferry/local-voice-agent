@@ -467,6 +467,13 @@ function onWSMessage(msg) {
             enqueueAudio(msg.content);
             break;
 
+        case "stop_playback":
+            // Server says: drop everything still playing / queued. Sent when a
+            // new utterance arrives while the previous one is still streaming
+            // (barge-in). Mirrors the local stopCurrentAudio() called by VAD.
+            stopCurrentAudio();
+            break;
+
         case "done":
             typer.flush();
             _resetLive();

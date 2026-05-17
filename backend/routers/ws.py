@@ -120,12 +120,20 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     )
 
             elif msg.get("bytes"):
+                # Barge-in: a new utterance arrived while the previous one is
+                # still being processed. Cancel everything cleanly:
+                #  1. tell the client to stop any audio currently playing
+                #  2. cancel the in-flight task (aborts LLM stream + drains TTS queue)
+                #  3. wait for it to fully unwind before starting the new task
                 if current_task and not current_task.done():
+                    await _send(ws, {"type": "stop_playback"})
                     current_task.cancel()
                     try:
                         await current_task
                     except asyncio.CancelledError:
                         pass
+                    except Exception:
+                        logger.exception("Previous task raised during barge-in cancel")
 
                 current_task = asyncio.create_task(
                     _handle_utterance(ws, msg["bytes"], session_id, providers)
