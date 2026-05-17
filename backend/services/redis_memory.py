@@ -5,8 +5,15 @@ import redis.asyncio as aioredis
 
 from config import settings
 
-MAX_TURNS    = 50        # turns stored per session
+MAX_TURNS    = 50         # turns stored per session
 HISTORY_TTL  = 86400 * 7  # 7 days
+
+# Long-term user-facts memory.
+# Stored separately from per-session messages and survives across sessions.
+# Examples: "user is a beginner", "user often confuses past tense forms".
+USER_FACTS_KEY_FMT = "user:{user_id}:facts"
+USER_FACTS_MAX     = 30           # cap so context doesn't explode
+USER_FACTS_TTL     = 86400 * 90   # 90 days — facts age out
 
 # Words that carry no topical signal — excluded from keyword scoring
 _STOP = {
@@ -86,14 +93,4 @@ class RedisMemory:
         messages.append({"role": "assistant", "content": assistant_text})
         if len(messages) > MAX_TURNS * 2:
             messages = messages[-(MAX_TURNS * 2):]
-        await self._redis.set(self._key(session_id), json.dumps(messages), ex=HISTORY_TTL)
-
-    async def clear(self, session_id: str) -> None:
-        await self._redis.delete(self._key(session_id))
-
-    async def health(self) -> bool:
-        try:
-            await self._redis.ping()
-            return True
-        except Exception:
-            return False
+      

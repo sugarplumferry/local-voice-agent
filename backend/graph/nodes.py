@@ -97,7 +97,16 @@ def _get_llm(config: RunnableConfig, *, temperature: float, num_predict: int | N
 
 
 def _build_chat_messages(state: AgentState) -> list:
-    msgs = [SystemMessage(content=SYSTEM_PROMPT)]
+    system_text = SYSTEM_PROMPT
+    facts = state.get("user_facts") or []
+    if facts:
+        system_text += (
+            "\n\nWhat I remember about this learner across sessions:\n"
+            + "\n".join(f"- {f}" for f in facts)
+            + "\nUse these facts to personalize tone and difficulty, "
+            "but do not quote them back verbatim."
+        )
+    msgs = [SystemMessage(content=system_text)]
     for m in state["messages"]:  # pre-filtered by RedisMemory.get_relevant_messages
         if m["role"] == "user":
             msgs.append(HumanMessage(content=m["content"]))

@@ -176,6 +176,7 @@ async def _handle_utterance(
 
     # ── 2. LangGraph pipeline + sentence-level TTS ────────────────────────────
     messages = await _memory.get_relevant_messages(session_id, full_text)
+    user_facts = await _memory.get_user_facts(session_id)
     initial_state: AgentState = {
         "messages":      messages,
         "current_input": full_text,
@@ -186,6 +187,7 @@ async def _handle_utterance(
         "session_id":    session_id,
         "audio_output":  None,
         "skip_tts":      True,   # ws.py handles TTS per-sentence externally
+        "user_facts":    user_facts,
     }
 
     run_config = {
