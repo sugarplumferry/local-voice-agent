@@ -4,7 +4,7 @@ WebSocket endpoint — single persistent connection per client.
 Protocol (all JSON except the binary WAV frames):
 
   Client → Server
-    text  {type: "init_session", session_id: str, settings: {...}}
+    text  {type: "init_session", session_id: str, user_id: str, settings: {...}}
     bytes  <raw WAV audio for one utterance>
 
   Server → Client
@@ -13,18 +13,9 @@ Protocol (all JSON except the binary WAV frames):
     {type: "token",             content: str}
     {type: "feedback",          content: str}
     {type: "audio",             content: str}  — base64 WAV (one per sentence)
+    {type: "stop_playback"}                    — barge-in: drop queued / playing audio
     {type: "done",              node_timings: dict}
     {type: "error",             message: str}
-
-Settings schema (sent in init_session):
-  {
-    openai_api_key: str,
-    stt:  "local" | "openai",
-    tts:  "local" | "openai",
-    tts_voice: "alloy" | "echo" | "fable" | "onyx" | "nova" | "shimmer",
-    llm:  "local" | "openai",
-    llm_model: str,   e.g. "gpt-4o-mini"
-  }
 """
 
 import asyncio
@@ -35,9 +26,10 @@ import re
 import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from config import settings
-from graph.nodes import GRAMMAR_MARKER
+from graph.nodes import GRAMMAR_MARKER, _get_llm
 from graph.pipeline import pipeline
 from graph.state import AgentState
 from services.redis_memory import RedisMemory
@@ -95,6 +87,7 @@ def _build_providers(user_settings: dict) -> dict:
 async def websocket_endpoint(ws: WebSocket) -> None:
     await ws.accept()
     session_id = "default"
+    user_id = "default"       # long-term identity (fact scope) — distinct from session
     current_task: asyncio.Task | None = None
     providers = _build_providers({})   # default: all local
     logger.info("WebSocket connected")
@@ -110,10 +103,15 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     continue
                 if data.get("type") == "init_session":
                     session_id = data.get("session_id", "default")
+                    # Fall back to session_id when the client did not send a
+                    # persistent user_id (older frontends). This preserves
+                    # backwards compatibility but disables long-term memory.
+                    user_id = data.get("user_id") or session_id
                     providers = _build_providers(data.get("settings", {}))
                     logger.info(
-                        "Session init: %s  stt=%s tts=%s llm=%s",
+                        "Session init: session=%s user=%s  stt=%s tts=%s llm=%s",
                         session_id,
+                        user_id,
                         type(providers["stt"]).__name__,
                         type(providers["tts"]).__name__,
                         providers["pipeline_config"].get("configurable", {}).get("llm_provider", "local"),
@@ -136,7 +134,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                         logger.exception("Previous task raised during barge-in cancel")
 
                 current_task = asyncio.create_task(
-                    _handle_utterance(ws, msg["bytes"], session_id, providers)
+                    _handle_utterance(ws, msg["bytes"], session_id, user_id, providers)
                 )
 
     except WebSocketDisconnect:
@@ -153,8 +151,91 @@ async def _send(ws: WebSocket, payload: dict) -> None:
         pass
 
 
+# ─── Long-term fact extraction (background task) ───────────────────────────────
+
+MIN_TURN_LEN_FOR_FACT_EXTRACTION = 15  # chars — skip ultra-short utterances
+MAX_FACTS_PER_TURN = 3                 # cap per turn so a chatty extractor can't flood
+
+FACT_EXTRACTION_SYSTEM_PROMPT = (
+    "You analyze a SINGLE conversation turn between a learner and an English "
+    "speaking-practice partner. Your job is to identify STABLE long-term facts "
+    "about the learner that the partner should remember for future sessions.\n\n"
+    "Good facts (stable, useful next time):\n"
+    "  - \"Learner is a beginner who confuses past tense forms\"\n"
+    "  - \"Learner is preparing for IELTS speaking\"\n"
+    "  - \"Learner is interested in travel and food topics\"\n\n"
+    "Do NOT extract:\n"
+    "  - One-off observations (\"said hello today\")\n"
+    "  - Anything about the assistant\n"
+    "  - Trivia specific to this conversation only\n\n"
+    "Output STRICT JSON: {\"facts\": [\"fact 1\", \"fact 2\"]}.\n"
+    "If the turn reveals no stable facts, output {\"facts\": []}.\n"
+    "Output JSON only — no commentary, no markdown fences."
+)
+
+
+def _parse_facts_json(text: str) -> list[str]:
+    """Extract the `facts` list from a JSON-ish LLM response. Tolerant of
+    surrounding noise (markdown fences, prose) — finds the outermost {...}
+    block and falls back to an empty list on any parse problem."""
+    if not text:
+        return []
+    match = re.search(r'\{[^{}]*"facts"[^{}]*\}', text, re.DOTALL)
+    if not match:
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        return []
+    try:
+        data = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return []
+    facts = data.get("facts") if isinstance(data, dict) else None
+    if not isinstance(facts, list):
+        return []
+    return [f.strip() for f in facts if isinstance(f, str) and f.strip()][:MAX_FACTS_PER_TURN]
+
+
+async def _extract_and_store_facts(
+    user_id: str,
+    user_text: str,
+    assistant_text: str,
+    pipeline_config: dict,
+) -> None:
+    """Best-effort background: call the LLM to find stable user facts,
+    persist any returned facts to long-term memory. Never blocks the reply
+    path. All exceptions are logged and swallowed."""
+    if len(user_text or "") < MIN_TURN_LEN_FOR_FACT_EXTRACTION:
+        return
+    try:
+        llm = _get_llm(
+            pipeline_config,
+            temperature=0,
+            num_predict=200,
+            streaming=False,
+        )
+        turn_text = (
+            f"USER: {user_text.strip()}\n"
+            f"ASSISTANT: {assistant_text.strip()}"
+        )
+        resp = await llm.ainvoke(
+            [
+                SystemMessage(content=FACT_EXTRACTION_SYSTEM_PROMPT),
+                HumanMessage(content=turn_text),
+            ],
+            config=pipeline_config,
+        )
+        text = resp.content if hasattr(resp, "content") else str(resp)
+        facts = _parse_facts_json(text if isinstance(text, str) else str(text))
+        for fact in facts:
+            added = await _memory.add_user_fact(user_id, fact)
+            if added:
+                logger.info("Extracted fact for user=%s: %r", user_id, fact)
+    except Exception:
+        logger.exception("Fact extraction failed (non-fatal)")
+
+
 async def _handle_utterance(
-    ws: WebSocket, wav_bytes: bytes, session_id: str, providers: dict
+    ws: WebSocket, wav_bytes: bytes, session_id: str, user_id: str, providers: dict
 ) -> None:
     stt_service = providers["stt"]
     tts_service = providers["tts"]
@@ -184,7 +265,7 @@ async def _handle_utterance(
 
     # ── 2. LangGraph pipeline + sentence-level TTS ────────────────────────────
     messages = await _memory.get_relevant_messages(session_id, full_text)
-    user_facts = await _memory.get_user_facts(session_id)
+    user_facts = await _memory.get_user_facts(user_id)
     initial_state: AgentState = {
         "messages":      messages,
         "current_input": full_text,
@@ -315,6 +396,12 @@ async def _handle_utterance(
         response_text = accumulated.get("response_text", "")
         if response_text:
             await _memory.add_turn(session_id, full_text, response_text)
+            # Background: ask the LLM to extract any stable long-term facts
+            # about this user from the turn. Best-effort, fire-and-forget so
+            # the reply isn't blocked. Survives across sessions via redis.
+            asyncio.create_task(
+                _extract_and_store_facts(user_id, full_text, response_text, pipeline_config)
+            )
 
         node_timings = accumulated.get("node_timings", {})
         node_timings["tts_node"] = round(tts_elapsed_total, 4)

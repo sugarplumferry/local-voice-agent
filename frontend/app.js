@@ -8,12 +8,30 @@
 
 const _wsProto      = location.protocol === "https:" ? "wss:" : "ws:";
 const BACKEND_WS    = `${_wsProto}//${location.host}/ws`;
-const SESSION_ID    = typeof crypto.randomUUID === "function"
-    ? crypto.randomUUID()
-    : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
+
+function _genUuid() {
+    if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
         const r = crypto.getRandomValues(new Uint8Array(1))[0] & 15;
         return (c === "x" ? r : (r & 0x3 | 0x8)).toString(16);
     });
+}
+
+// SESSION_ID is fresh every page load — scopes short-term conversation history.
+const SESSION_ID = _genUuid();
+
+// USER_ID is persisted in localStorage — scopes long-term user facts that
+// should survive across sessions and even browser reloads.
+const USER_ID_KEY = "voice_agent_user_id";
+const USER_ID = (() => {
+    let id = localStorage.getItem(USER_ID_KEY);
+    if (!id) {
+        id = _genUuid();
+        localStorage.setItem(USER_ID_KEY, id);
+    }
+    return id;
+})();
+
 const VU_BARS       = 24;
 const INTERRUPT_TICKS = 6;   // × ~29 ms per tick ≈ 174 ms sustained speech
 const SETTINGS_KEY  = "voice_agent_settings";
@@ -264,8 +282,13 @@ function stopRecording() {
 function connectWS() {
     ws = new WebSocket(BACKEND_WS);
     ws.onopen  = () => {
-        console.log(`[WS] connected  session=${SESSION_ID}`);
-        ws.send(JSON.stringify({ type: "init_session", session_id: SESSION_ID, settings: currentSettings }));
+        console.log(`[WS] connected  session=${SESSION_ID}  user=${USER_ID}`);
+        ws.send(JSON.stringify({
+            type: "init_session",
+            session_id: SESSION_ID,
+            user_id:    USER_ID,
+            settings:   currentSettings,
+        }));
         setStatus("Listening…");
     };
     ws.onmessage = ({ data }) => onWSMessage(JSON.parse(data));
@@ -597,18 +620,4 @@ function _openModal() {
     cfgApiKey.focus();
 }
 
-function _closeModal() { modalEl.classList.add("hidden"); }
-
-function _updateSubSettings() {
-    const ttsOpenAI = document.querySelector('input[name="tts"]:checked')?.value === "openai";
-    const llmChoice = document.querySelector('input[name="llm"]:checked')?.value;
-    ttsVoiceRow.classList.toggle("hidden", !ttsOpenAI);
-    llmModelRow.classList.toggle("hidden",  llmChoice !== "openai");
-    groqModelRow.classList.toggle("hidden", llmChoice !== "groq");
-}
-
-function _saveSettings() {
-    const s = {
-        openai_api_key: cfgApiKey.value.trim(),
-        groq_api_key:   cfgGroqKey.value.trim(),
-        stt:        document.querySelector('input[nam
+function _closeModal() { modalEl.classList.add("hidden"); 
