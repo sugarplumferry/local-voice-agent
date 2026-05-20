@@ -131,4 +131,88 @@ async def transcribe_node(state: AgentState) -> dict:
     }
 
 
-# -----------------------
+# ---------------------------------------------------------------------------
+# Node 2 – llm_response_node
+# Single LLM call: generates the conversational reply and, if a grammar error
+# is present, appends a GRAMMAR: correction line that ws.py strips before TTS.
+# Wrapped in a classify-and-retry loop so transient LLM failures don't kill
+# the whole utterance.
+# ---------------------------------------------------------------------------
+async def llm_response_node(state: AgentState, config: RunnableConfig) -> dict:
+    start = time.perf_counter()
+    llm = _get_llm(config, temperature=0.7, streaming=True)
+    messages = _build_chat_messages(state)
+
+    chunks: list[str] = []
+    last_err: BaseException | None = None
+    for attempt in range(LLM_MAX_ATTEMPTS):
+        chunks = []  # restart accumulator on each attempt
+        try:
+            async for chunk in llm.astream(messages, config=config):
+                if chunk.content:
+                    chunks.append(chunk.content)
+            last_err = None
+            break
+        except BaseException as exc:  # noqa: BLE001 — we classify below
+            last_err = exc
+            kind = _classify_llm_error(exc)
+            if kind == "hard" or attempt == LLM_MAX_ATTEMPTS - 1:
+                logger.error(
+                    "LLM failure (kind=%s, attempt=%d/%d): %s",
+                    kind, attempt + 1, LLM_MAX_ATTEMPTS, exc,
+                )
+                raise
+            wait = LLM_BACKOFF_BASE_SEC * (2 ** attempt)
+            logger.warning(
+                "LLM transient (kind=%s, attempt=%d/%d), retry in %.1fs: %s",
+                kind, attempt + 1, LLM_MAX_ATTEMPTS, wait, exc,
+            )
+            await asyncio.sleep(wait)
+
+    if last_err is not None and not chunks:
+        raise last_err
+
+    full = "".join(chunks)
+
+    if GRAMMAR_MARKER in full:
+        idx = full.index(GRAMMAR_MARKER)
+        response_text = full[:idx].strip()
+        feedback_text = full[idx + len(GRAMMAR_MARKER):].strip()
+    else:
+        response_text = full.strip()
+        feedback_text = None
+
+    return {
+        "response_text": response_text,
+        "feedback_text": feedback_text,
+        "grammar_error": feedback_text is not None,
+        "node_timings": {
+            **state["node_timings"],
+            "llm_response_node": round(time.perf_counter() - start, 4),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node 3 – tts_node
+# No-op when skip_tts=True (ws.py handles TTS per-sentence externally).
+# ---------------------------------------------------------------------------
+async def tts_node(state: AgentState) -> dict:
+    if state.get("skip_tts"):
+        return {"audio_output": None}
+
+    start = time.perf_counter()
+    audio_b64: str | None = None
+    try:
+        audio_bytes = await _speaches.text_to_speech(state.get("response_text") or "")
+        import base64
+        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+    except Exception:
+        pass
+    return {
+        "audio_output": audio_b64,
+        "node_timings": {
+            **state["node_timings"],
+            "tts_node": round(time.perf_counter() - start, 4),
+        },
+    }

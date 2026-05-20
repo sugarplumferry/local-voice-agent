@@ -91,6 +91,76 @@ class RedisMemory:
         messages = await self.get_messages(session_id)
         messages.append({"role": "user",      "content": user_text})
         messages.append({"role": "assistant", "content": assistant_text})
+
         if len(messages) > MAX_TURNS * 2:
             messages = messages[-(MAX_TURNS * 2):]
-      
+        await self._redis.set(self._key(session_id), json.dumps(messages), ex=HISTORY_TTL)
+
+    async def clear(self, session_id: str) -> None:
+        await self._redis.delete(self._key(session_id))
+
+    # ─── Long-term user facts (cross-session) ──────────────────────────────────
+    # These are persisted strings about the *user* (level, recurring mistakes,
+    # topics they enjoy). The conversational LLM injects them into its system
+    # prompt so it adapts across sessions without re-discovering everything.
+    # Extraction strategy is left to the caller — typically a small LLM call
+    # after each turn looking for stable, useful facts.
+
+    def _facts_key(self, user_id: str) -> str:
+        return USER_FACTS_KEY_FMT.format(user_id=user_id)
+
+    async def get_user_facts(self, user_id: str) -> list[str]:
+        raw = await self._redis.get(self._facts_key(user_id))
+        return json.loads(raw) if raw else []
+
+    async def add_user_fact(self, user_id: str, fact: str) -> bool:
+        """Append a fact to the user's long-term memory.
+
+        - Trims whitespace; skips empty or duplicate facts (case-insensitive)
+        - Caps at USER_FACTS_MAX entries (oldest dropped first)
+        - Refreshes TTL on every write
+        Returns True if the fact was actually added.
+        """
+        fact = (fact or "").strip()
+        if not fact:
+            return False
+
+        facts = await self.get_user_facts(user_id)
+        lowered = {f.lower() for f in facts}
+        if fact.lower() in lowered:
+            return False
+
+        facts.append(fact)
+        if len(facts) > USER_FACTS_MAX:
+            facts = facts[-USER_FACTS_MAX:]
+
+        await self._redis.set(
+            self._facts_key(user_id),
+            json.dumps(facts),
+            ex=USER_FACTS_TTL,
+        )
+        return True
+
+    async def remove_user_fact(self, user_id: str, fact: str) -> bool:
+        """Remove an exact fact (case-insensitive). Returns True if removed."""
+        facts = await self.get_user_facts(user_id)
+        target = (fact or "").strip().lower()
+        kept = [f for f in facts if f.lower() != target]
+        if len(kept) == len(facts):
+            return False
+        await self._redis.set(
+            self._facts_key(user_id),
+            json.dumps(kept),
+            ex=USER_FACTS_TTL,
+        )
+        return True
+
+    async def clear_user_facts(self, user_id: str) -> None:
+        await self._redis.delete(self._facts_key(user_id))
+
+    async def health(self) -> bool:
+        try:
+            await self._redis.ping()
+            return True
+        except Exception:
+            return False

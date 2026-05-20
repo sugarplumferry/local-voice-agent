@@ -302,4 +302,44 @@ async def _handle_utterance(
             await _send(ws, {"type": "token", "content": leftover})
             sentence_buf += leftover
 
-        # Flush any remaining response text that didn't end with punctuati
+        # Flush any remaining response text that didn't end with punctuation
+        remaining = sentence_buf.strip()
+        if remaining and not reply_done:
+            await tts_queue.put(remaining)
+
+        # Signal TTS runner to stop and wait for all audio to be sent
+        await tts_queue.put(None)
+        await tts_task
+
+        # ── 3. Post-pipeline ──────────────────────────────────────────────────
+        response_text = accumulated.get("response_text", "")
+        if response_text:
+            await _memory.add_turn(session_id, full_text, response_text)
+
+        node_timings = accumulated.get("node_timings", {})
+        node_timings["tts_node"] = round(tts_elapsed_total, 4)
+
+        await _send(ws, {
+            "type":         "done",
+            "node_timings": node_timings,
+        })
+
+    except asyncio.CancelledError:
+        # Barge-in path: someone outside (the websocket loop) cancelled us.
+        # Drain the TTS queue so the runner exits promptly instead of spinning
+        # on the next pending sentence, then re-raise so the outer loop knows.
+        logger.info("Utterance cancelled (barge-in)")
+        while not tts_queue.empty():
+            try:
+                tts_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        await tts_queue.put(None)
+        raise
+    finally:
+        if not tts_task.done():
+            tts_task.cancel()
+            try:
+                await tts_task
+            except asyncio.CancelledError:
+                pass
