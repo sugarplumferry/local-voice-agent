@@ -620,4 +620,42 @@ function _openModal() {
     cfgApiKey.focus();
 }
 
-function _closeModal() { modalEl.classList.add("hidden"); 
+function _closeModal() { modalEl.classList.add("hidden"); }
+
+function _updateSubSettings() {
+    const ttsOpenAI = document.querySelector('input[name="tts"]:checked')?.value === "openai";
+    const llmChoice = document.querySelector('input[name="llm"]:checked')?.value;
+    ttsVoiceRow.classList.toggle("hidden", !ttsOpenAI);
+    llmModelRow.classList.toggle("hidden",  llmChoice !== "openai");
+    groqModelRow.classList.toggle("hidden", llmChoice !== "groq");
+}
+
+function _saveSettings() {
+    const s = {
+        openai_api_key: cfgApiKey.value.trim(),
+        groq_api_key:   cfgGroqKey.value.trim(),
+        stt:        document.querySelector('input[name="stt"]:checked').value,
+        tts:        document.querySelector('input[name="tts"]:checked').value,
+        tts_voice:  cfgTtsVoice.value,
+        llm:        document.querySelector('input[name="llm"]:checked').value,
+        llm_model:  cfgLlmModel.value,
+        groq_model: cfgGroqModel.value,
+    };
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+    currentSettings = s;
+    _closeModal();
+}
+
+btnSettings.addEventListener("click", _openModal);
+btnModalClose.addEventListener("click", _closeModal);
+btnSave.addEventListener("click", _saveSettings);
+
+// Close on backdrop click
+modalEl.querySelector(".modal-backdrop").addEventListener("click", _closeModal);
+
+// Close on Escape
+document.addEventListener("keydown", e => { if (e.key === "Escape") _closeModal(); });
+
+// Show/hide sub-settings when provider radios change
+document.querySelectorAll('input[name="tts"], input[name="llm"]')
+    .forEach(r => r.addEventListener("change", _updateSubSettings));
