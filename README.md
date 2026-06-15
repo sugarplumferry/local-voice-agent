@@ -11,9 +11,13 @@ Everything runs on your own machine: no cloud API, no data leaving your network.
 - **Voice Activity Detection** — AudioWorklet-based VAD with draggable threshold marker on the VU meter
 - **Streaming transcription** — faster-whisper segments appear progressively as you speak
 - **Conversational AI** — llama3.1:8b via Ollama responds naturally in real time (streaming tokens)
+- **Provider switching** — runtime swap between local (Ollama / Whisper / Kokoro) and OpenAI / Groq via the ⚙ settings modal; API keys stored in localStorage
 - **Grammar feedback** — a separate LLM node detects errors and gives a one-sentence friendly correction
 - **Sentence-level TTS** — Kokoro-82M starts speaking each sentence as soon as it's generated, overlapping with the LLM still writing the next one
+- **Barge-in** — speaking over the agent cancels the LLM stream, drains the TTS queue, and tells the browser to drop any audio still playing
 - **Smart conversation memory** — stores up to 50 turns in Redis; retrieves the last 4 turns + up to 3 topically relevant older turns on each request
+- **Long-term user memory** — names, jobs, goals, English level etc. are auto-extracted after each turn and replayed across sessions (`USER_ID` persisted in localStorage)
+- **Volume control** — bottom-bar slider applies a `GainNode` to TTS playback live; setting persisted in localStorage
 - **Mobile access** — ngrok + nginx WebSocket proxy lets your phone connect over HTTPS
 - **LangGraph pipeline** — full observability via LangSmith tracing
 
@@ -165,8 +169,10 @@ dev.bat phone-stop   # stop tunnel + containers
 | Control | Description |
 |---|---|
 | 🎙 button | Start / stop listening |
+| ⚙ button | Open settings modal — choose STT / TTS / LLM provider, paste OpenAI / Groq keys, pick model & voice |
 | VU meter | Live microphone level; **drag the red marker** to set VAD threshold |
 | Silence slider | How long silence must last before the utterance is sent (300–1000 ms) |
+| Volume slider | TTS playback volume (0–100%); applies live to the currently-playing sentence |
 
 **Bubble colours:**
 - Blue (right) — your speech
@@ -177,9 +183,19 @@ dev.bat phone-stop   # stop tunnel + containers
 
 ## Conversation Memory
 
+### Short-term (per session)
+
 - Up to **50 turns** stored per session in Redis (TTL: 7 days)
 - Each request uses: last 4 turns (always) + up to 3 older turns selected by **keyword relevance** to the current utterance
-- Session is tied to the browser tab — **refresh = new session**
+- `SESSION_ID` is tied to the browser tab — **refresh = new session**
+
+### Long-term (per user, across sessions)
+
+- After every turn the backend fires a best-effort background LLM call that asks for **stable facts** about the learner — name, job, location, goals, English level, recurring mistakes — and writes any new ones to Redis under `user:<USER_ID>:facts`
+- `USER_ID` is generated once and persisted in `localStorage`, so facts survive refreshes, new sessions, and even browser restarts (until storage is cleared)
+- Up to **30 facts** per user, TTL **90 days**, duplicates skipped (case-insensitive)
+- On every utterance the facts are loaded and injected into the LLM system prompt as `What I remember about this learner across sessions: …`
+- To wipe long-term memory: clear the site's localStorage, or `DEL user:<id>:facts` in Redis
 
 ---
 
