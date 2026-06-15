@@ -40,6 +40,11 @@
                 <input type="range" id="sl-silence" min="300" max="1000" step="100" value="300" />
                 <span id="lbl-silence">300ms</span>
             </div>
+            <div class="setting-item">
+                <label for="sl-volume">Volume</label>
+                <input type="range" id="sl-volume" min="0" max="100" step="5" value="100" />
+                <span id="lbl-volume">100%</span>
+            </div>
         </div>
     </div>
 </div>
@@ -130,4 +135,29 @@
                         <option value="gpt-4o-mini">gpt-4o-mini</option>
                         <option value="gpt-4o">gpt-4o</option>
                         <option value="gpt-4.1-mini">gpt-4.1-mini</option>
-      
+                        <option value="gpt-4.1">gpt-4.1</option>
+                    </select>
+                </div>
+                <div class="sub-setting" id="groq-model-row">
+                    <label for="cfg-groq-model">Model</label>
+                    <select id="cfg-groq-model">
+                        <option value="llama-3.3-70b-versatile">llama-3.3-70b-versatile</option>
+                        <option value="llama-3.1-8b-instant">llama-3.1-8b-instant</option>
+                        <option value="openai/gpt-oss-120b">openai/gpt-oss-120b</option>
+                        <option value="openai/gpt-oss-20b">openai/gpt-oss-20b</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <div class="modal-footer">
+            <small id="modal-hint">Changes take effect on next recording start.</small>
+            <button id="btn-save-settings">Save</button>
+        </div>
+    </div>
+</div>
+
+<script src="audio-buffer.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

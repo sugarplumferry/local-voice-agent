@@ -141,6 +141,25 @@ class RedisMemory:
         )
         return True
 
+    async def replace_user_fact(self, user_id: str, index: int, fact: str) -> bool:
+        """Replace the fact at `index` (0-based) with a more specific version.
+        Preserves position. Returns True iff index was valid and content changed."""
+        fact = (fact or "").strip()
+        if not fact:
+            return False
+        facts = await self.get_user_facts(user_id)
+        if not 0 <= index < len(facts):
+            return False
+        if facts[index].lower() == fact.lower():
+            return False
+        facts[index] = fact
+        await self._redis.set(
+            self._facts_key(user_id),
+            json.dumps(facts),
+            ex=USER_FACTS_TTL,
+        )
+        return True
+
     async def remove_user_fact(self, user_id: str, fact: str) -> bool:
         """Remove an exact fact (case-insensitive). Returns True if removed."""
         facts = await self.get_user_facts(user_id)

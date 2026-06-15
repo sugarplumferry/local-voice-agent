@@ -35,6 +35,7 @@ const USER_ID = (() => {
 const VU_BARS       = 24;
 const INTERRUPT_TICKS = 6;   // × ~29 ms per tick ≈ 174 ms sustained speech
 const SETTINGS_KEY  = "voice_agent_settings";
+const VOLUME_KEY    = "voice_agent_volume";  // 0–100, persisted across sessions
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 
@@ -69,6 +70,9 @@ let turnPcm            = null;
 let currentSource      = null;
 const audioQueue       = [];
 let _audioInterruptedAt = null;  // set by stopCurrentAudio() to block echo false-positives
+let _isSpeaking         = false; // edge-debounced voice activity, mirrored to backend
+let _lastVoiceTs        = 0;     // ms — last frame with db > threshold
+const SPEAKING_DECAY_MS = 150;   // silence this long flips _isSpeaking back to false
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 
@@ -78,8 +82,18 @@ const conversationEl = document.getElementById("conversation");
 const vuMeterEl      = document.getElementById("vu-meter");
 const slSilence      = document.getElementById("sl-silence");
 const lblSilence     = document.getElementById("lbl-silence");
+const slVolume       = document.getElementById("sl-volume");
+const lblVolume      = document.getElementById("lbl-volume");
 const lblThreshold   = document.getElementById("lbl-threshold");
 const threshMarkerEl = document.getElementById("threshold-marker");
+
+// Restore saved volume (0–100 percent) → currentVolume in 0.0–1.0 for GainNode
+const _savedVol  = parseInt(localStorage.getItem(VOLUME_KEY), 10);
+let currentVolume = Number.isFinite(_savedVol)
+    ? Math.max(0, Math.min(100, _savedVol)) / 100
+    : 1.0;
+slVolume.value      = Math.round(currentVolume * 100);
+lblVolume.textContent = `${slVolume.value}%`;
 
 // ── TypeAnimator ──────────────────────────────────────────────────────────────
 // Streams text into the DOM at ~50 cps / 25 fps.
@@ -203,6 +217,14 @@ slSilence.addEventListener("input", () => {
     workletNode?.port.postMessage({ type: "config", silenceDurationMs: Number(slSilence.value) });
 });
 
+slVolume.addEventListener("input", () => {
+    currentVolume = Number(slVolume.value) / 100;
+    lblVolume.textContent = `${slVolume.value}%`;
+    localStorage.setItem(VOLUME_KEY, slVolume.value);
+    // Apply live to the currently-playing chunk; queued chunks pick it up on start.
+    if (currentSource?.gain) currentSource.gain.gain.value = currentVolume;
+});
+
 // ── Button ────────────────────────────────────────────────────────────────────
 
 btnStart.addEventListener("click", () => {
@@ -305,14 +327,25 @@ let activeUserEl        = null;
 let activeAgentEl       = null;
 let _transcriptFinalized = false;   // true after "transcript" msg, reset on fresh turn / done
 
+function _sendVoiceState(active) {
+    if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "voice_state", active }));
+    }
+}
+
 function onWorkletMessage({ data }) {
     if (data.type === "db") {
         updateVu(data.value);
         if (data.value > currentThresholdDb) {
+            _lastVoiceTs = Date.now();
             exceedCount++;
             if (exceedCount >= INTERRUPT_TICKS && currentSource) stopCurrentAudio();
+            if (!_isSpeaking) { _isSpeaking = true; _sendVoiceState(true); }
         } else {
             exceedCount = 0;
+            if (_isSpeaking && Date.now() - _lastVoiceTs > SPEAKING_DECAY_MS) {
+                _isSpeaking = false; _sendVoiceState(false);
+            }
         }
 
     } else if (data.type === "utterance") {
@@ -543,10 +576,12 @@ async function playBase64Audio(b64wav) {
         _playNextInQueue();
         return;
     }
-    const src = ctx.createBufferSource();
+    const src  = ctx.createBufferSource();
+    const gain = ctx.createGain();
+    gain.gain.value = currentVolume;
     src.buffer = decoded;
-    src.connect(ctx.destination);
-    currentSource = { source: src, ctx };
+    src.connect(gain).connect(ctx.destination);
+    currentSource = { source: src, ctx, gain };
     src.onended = () => { ctx.close(); currentSource = null; _playNextInQueue(); };
     src.start();
 }

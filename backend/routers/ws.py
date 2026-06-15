@@ -90,16 +90,32 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     user_id = "default"       # long-term identity (fact scope) — distinct from session
     current_task: asyncio.Task | None = None
     providers = _build_providers({})   # default: all local
+    # Per-connection cross-turn state.
+    #   last_feedback — suppress the small-LLM tic of regurgitating a grammar
+    #     correction from earlier history when the current turn has no error.
+    #   user_speaking — frontend-reported VAD state; used to hold transcript
+    #     finalization while the user is still mid-sentence after transcribe.
+    session_state: dict = {"last_feedback": None, "user_speaking": False}
     logger.info("WebSocket connected")
 
     try:
         while True:
             msg = await ws.receive()
 
+            # Raw ws.receive() does NOT raise WebSocketDisconnect — it returns a
+            # {"type": "websocket.disconnect"} message. Detect it and break, or
+            # the next receive() raises RuntimeError ("Cannot call receive once
+            # a disconnect message has been received").
+            if msg.get("type") == "websocket.disconnect":
+                raise WebSocketDisconnect(msg.get("code", 1000))
+
             if msg.get("text"):
                 try:
                     data = json.loads(msg["text"])
                 except json.JSONDecodeError:
+                    continue
+                if data.get("type") == "voice_state":
+                    session_state["user_speaking"] = bool(data.get("active"))
                     continue
                 if data.get("type") == "init_session":
                     session_id = data.get("session_id", "default")
@@ -134,7 +150,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                         logger.exception("Previous task raised during barge-in cancel")
 
                 current_task = asyncio.create_task(
-                    _handle_utterance(ws, msg["bytes"], session_id, user_id, providers)
+                    _handle_utterance(ws, msg["bytes"], session_id, user_id, providers, session_state)
                 )
 
     except WebSocketDisconnect:
@@ -151,6 +167,24 @@ async def _send(ws: WebSocket, payload: dict) -> None:
         pass
 
 
+async def _wait_user_silent(state: dict, grace_s: float) -> None:
+    """Block until `state['user_speaking']` has been False for `grace_s`
+    consecutive seconds. Polls at 50 ms.
+
+    No overall timeout — if the user genuinely never stops, the escape hatch
+    is the barge-in path: a new utterance arriving cancels this task, and
+    the await-sleep below makes the cancellation cooperative."""
+    silent_since: float | None = None
+    while True:
+        if state.get("user_speaking"):
+            silent_since = None
+        elif silent_since is None:
+            silent_since = time.monotonic()
+        elif time.monotonic() - silent_since >= grace_s:
+            return
+        await asyncio.sleep(0.05)
+
+
 # ─── Long-term fact extraction (background task) ───────────────────────────────
 
 MIN_TURN_LEN_FOR_FACT_EXTRACTION = 15  # chars — skip ultra-short utterances
@@ -160,17 +194,39 @@ FACT_EXTRACTION_SYSTEM_PROMPT = (
     "You analyze a SINGLE conversation turn between a learner and an English "
     "speaking-practice partner. Your job is to identify STABLE long-term facts "
     "about the learner that the partner should remember for future sessions.\n\n"
-    "Good facts (stable, useful next time):\n"
+    "ALWAYS extract personal identity details the learner states about "
+    "themselves: their name, job, location, age, hobbies, goals, family, "
+    "English level, recurring mistakes. A learner's name is ALWAYS a good fact.\n\n"
+    "Phrase EVERY fact as a complete third-person sentence about the learner, "
+    "starting with \"Learner\". Examples:\n"
+    "  - \"Learner's name is Charlie\"\n"
+    "  - \"Learner works as a software engineer in Taipei\"\n"
     "  - \"Learner is a beginner who confuses past tense forms\"\n"
     "  - \"Learner is preparing for IELTS speaking\"\n"
-    "  - \"Learner is interested in travel and food topics\"\n\n"
+    "Never output a bare word or a first-person sentence.\n\n"
     "Do NOT extract:\n"
-    "  - One-off observations (\"said hello today\")\n"
-    "  - Anything about the assistant\n"
-    "  - Trivia specific to this conversation only\n\n"
+    "  - Anything about the assistant, or about the conversation itself "
+    "(NOT: \"learner's name was forgotten by the assistant\", "
+    "\"learner mentioned this earlier\")\n"
+    "  - Transient or in-the-moment states "
+    "(NOT: \"is hungry now\", \"is tired today\", \"is not well prepared for the conversation\")\n"
+    "  - Pure greetings, fillers, or politeness with no information\n"
+    "EVERY fact you output MUST still be true a week from now. If unsure, "
+    "leave it out.\n\n"
     "Output STRICT JSON: {\"facts\": [\"fact 1\", \"fact 2\"]}.\n"
     "If the turn reveals no stable facts, output {\"facts\": []}.\n"
     "Output JSON only — no commentary, no markdown fences."
+)
+
+
+FACT_DEDUP_SYSTEM_PROMPT = (
+    "You maintain a short list of stable long-term facts about a learner. "
+    "A NEW candidate fact has arrived. Decide EXACTLY ONE of:\n"
+    "  ADD          — the candidate adds information not covered by any existing fact\n"
+    "  SKIP         — the candidate is already covered (same meaning, less specific, or a near-duplicate)\n"
+    "  REPLACE:<N>  — the candidate is a MORE SPECIFIC or MORE ACCURATE version of existing fact #N (1-based)\n\n"
+    "Output EXACTLY one line containing only one of those three tokens. "
+    "No prose, no punctuation, no explanation."
 )
 
 
@@ -195,15 +251,58 @@ def _parse_facts_json(text: str) -> list[str]:
     return [f.strip() for f in facts if isinstance(f, str) and f.strip()][:MAX_FACTS_PER_TURN]
 
 
+async def _dedup_decision(
+    existing: list[str], candidate: str, pipeline_config: dict
+) -> tuple[str, int | None]:
+    """Ask a small LLM whether `candidate` is new info, a duplicate, or a
+    refinement of an existing fact. Returns one of:
+        ("ADD", None) | ("SKIP", None) | ("REPLACE", zero_based_index)
+    Defaults to ADD on any error so we never silently drop facts."""
+    if not existing:
+        return ("ADD", None)
+    listing = "\n".join(f"{i + 1}. {f}" for i, f in enumerate(existing))
+    user_msg = f"Existing facts:\n{listing}\n\nCandidate: {candidate}"
+    try:
+        llm = _get_llm(
+            pipeline_config,
+            temperature=0,
+            num_predict=20,
+            streaming=False,
+        )
+        resp = await llm.ainvoke(
+            [
+                SystemMessage(content=FACT_DEDUP_SYSTEM_PROMPT),
+                HumanMessage(content=user_msg),
+            ],
+            config=pipeline_config,
+        )
+        text = (resp.content if hasattr(resp, "content") else str(resp)).strip().upper()
+    except Exception:
+        logger.exception("Fact dedup failed (non-fatal); defaulting to ADD")
+        return ("ADD", None)
+
+    if text.startswith("SKIP"):
+        return ("SKIP", None)
+    if text.startswith("REPLACE"):
+        try:
+            tail = text.split(":", 1)[1].strip().split()[0]
+            idx = int(re.sub(r"[^0-9]", "", tail) or "0")
+            if 1 <= idx <= len(existing):
+                return ("REPLACE", idx - 1)
+        except (IndexError, ValueError):
+            pass
+    return ("ADD", None)
+
+
 async def _extract_and_store_facts(
     user_id: str,
     user_text: str,
     assistant_text: str,
     pipeline_config: dict,
 ) -> None:
-    """Best-effort background: call the LLM to find stable user facts,
-    persist any returned facts to long-term memory. Never blocks the reply
-    path. All exceptions are logged and swallowed."""
+    """Best-effort background: call the LLM to find stable user facts, then
+    LLM-dedup each candidate against existing facts before persisting. Never
+    blocks the reply path; all exceptions are logged and swallowed."""
     if len(user_text or "") < MIN_TURN_LEN_FOR_FACT_EXTRACTION:
         return
     try:
@@ -226,16 +325,32 @@ async def _extract_and_store_facts(
         )
         text = resp.content if hasattr(resp, "content") else str(resp)
         facts = _parse_facts_json(text if isinstance(text, str) else str(text))
+
+        # One-at-a-time so a REPLACE made earlier is visible to the next candidate.
         for fact in facts:
-            added = await _memory.add_user_fact(user_id, fact)
-            if added:
-                logger.info("Extracted fact for user=%s: %r", user_id, fact)
+            existing = await _memory.get_user_facts(user_id)
+            action, idx = await _dedup_decision(existing, fact, pipeline_config)
+            if action == "SKIP":
+                logger.info("Skipped duplicate fact for user=%s: %r", user_id, fact)
+            elif action == "REPLACE" and idx is not None:
+                if await _memory.replace_user_fact(user_id, idx, fact):
+                    logger.info(
+                        "Replaced fact #%d for user=%s: %r", idx + 1, user_id, fact
+                    )
+            else:
+                if await _memory.add_user_fact(user_id, fact):
+                    logger.info("Added fact for user=%s: %r", user_id, fact)
     except Exception:
         logger.exception("Fact extraction failed (non-fatal)")
 
 
 async def _handle_utterance(
-    ws: WebSocket, wav_bytes: bytes, session_id: str, user_id: str, providers: dict
+    ws: WebSocket,
+    wav_bytes: bytes,
+    session_id: str,
+    user_id: str,
+    providers: dict,
+    session_state: dict,
 ) -> None:
     stt_service = providers["stt"]
     tts_service = providers["tts"]
@@ -260,6 +375,18 @@ async def _handle_utterance(
     if not full_text:
         await _send(ws, {"type": "done", "node_timings": {}})  # reset UI
         return
+
+    # If the user is still mid-sentence when transcribe finishes, hold the
+    # finalize step. A new utterance arriving meanwhile cancels this task
+    # (barge-in) and the frontend will resend combined PCM so we transcribe
+    # the full thought instead of splitting it.
+    if session_state.get("user_speaking"):
+        logger.info(
+            "Holding transcript — user still speaking after transcribe (%ss)",
+            round(transcribe_elapsed, 2),
+        )
+        await _wait_user_silent(session_state, grace_s=0.3)
+        logger.info("Resumed (user paused)")
 
     await _send(ws, {"type": "transcript", "text": full_text})
 
@@ -366,11 +493,17 @@ async def _handle_utterance(
                     output = event.get("data", {}).get("output", {})
                     if isinstance(output, dict):
                         accumulated.update(output)
-                        # Send feedback when the single LLM node finishes
+                        # Send feedback when the single LLM node finishes.
+                        # Suppress consecutive duplicates within the same
+                        # connection — small LLMs sometimes re-emit a correction
+                        # from earlier in the conversation history.
                         if node == "llm_response_node":
                             feedback = output.get("feedback_text")
-                            if feedback:
+                            if feedback and feedback != session_state.get("last_feedback"):
                                 await _send(ws, {"type": "feedback", "content": feedback})
+                                session_state["last_feedback"] = feedback
+                            elif feedback:
+                                logger.info("Suppressed duplicate feedback: %r", feedback)
 
         except Exception as exc:
             logger.exception("Pipeline error")

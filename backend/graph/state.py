@@ -25,3 +25,7 @@ class AgentState(TypedDict):
     audio_output: Optional[str]
     # Set True by the WebSocket handler to skip in-graph TTS (handled externally)
     skip_tts: bool
+    # Long-term cross-session facts about the user, loaded from Redis by the
+    # WebSocket handler. Must be declared here or LangGraph drops it from state
+    # before it reaches llm_response_node.
+    user_facts: list[str]
