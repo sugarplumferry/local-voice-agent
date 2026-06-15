@@ -6,7 +6,9 @@ Everything runs on your own machine: no cloud API, no data leaving your network.
 
 ---
 ## Demo
-https://github.com/user-attachments/assets/0658dbfe-d138-4cf0-9e51-453a556357c0
+https://github.com/user-attachments/assets/5a32b240-d3aa-424b-89f1-78f3c4b69aec
+
+
 
 
 
