@@ -5,6 +5,10 @@ Speak → get an instant AI reply + grammar correction → hear it spoken back.
 Everything runs on your own machine: no cloud API, no data leaving your network.
 
 ---
+## Demo
+https://github.com/user-attachments/assets/0658dbfe-d138-4cf0-9e51-453a556357c0
+
+
 
 ## Features
 
