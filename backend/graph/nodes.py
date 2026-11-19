@@ -74,11 +74,14 @@ def _get_llm(config: RunnableConfig, *, temperature: float, num_predict: int | N
     if provider == "groq":
         from langchain_groq import ChatGroq
         kw = {
-            "model": cfg.get("llm_model", "llama-3.3-70b-versatile"),
+            "model": cfg.get("llm_model", "openai/gpt-oss-20b"),
             "api_key": cfg.get("groq_api_key"),
             "temperature": temperature,
             "streaming": streaming,
         }
+        if kw["model"].startswith("openai/gpt-oss"):
+            # Reasoning model — keep thinking short; voice latency matters more.
+            kw["reasoning_effort"] = "low"
         if num_predict:
             kw["max_tokens"] = num_predict
         return ChatGroq(**kw)

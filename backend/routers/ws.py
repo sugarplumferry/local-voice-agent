@@ -77,7 +77,7 @@ def _build_providers(user_settings: dict) -> dict:
         pipeline_config["configurable"] = {
             "llm_provider": "groq",
             "groq_api_key": groq_key,
-            "llm_model": user_settings.get("groq_model", "llama-3.3-70b-versatile"),
+            "llm_model": user_settings.get("groq_model", "openai/gpt-oss-20b"),
         }
 
     return {"stt": stt_service, "tts": tts_service, "pipeline_config": pipeline_config}

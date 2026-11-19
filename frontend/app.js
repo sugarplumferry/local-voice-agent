@@ -48,13 +48,19 @@ function _defaultSettings() {
         tts_voice:  "alloy",
         llm:        "local",
         llm_model:  "gpt-4o-mini",
-        groq_model: "llama-3.3-70b-versatile",
+        groq_model: "openai/gpt-oss-20b",
     };
 }
 
+// Groq shut these down on 2026-08-16; settings saved before then still hold them.
+const RETIRED_GROQ_MODELS = new Set(["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]);
+
 let currentSettings = (() => {
-    try { return { ..._defaultSettings(), ...JSON.parse(localStorage.getItem(SETTINGS_KEY)) }; }
+    let s;
+    try { s = { ..._defaultSettings(), ...JSON.parse(localStorage.getItem(SETTINGS_KEY)) }; }
     catch { return _defaultSettings(); }
+    if (RETIRED_GROQ_MODELS.has(s.groq_model)) s.groq_model = _defaultSettings().groq_model;
+    return s;
 })();
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -649,7 +655,7 @@ function _openModal() {
     document.querySelector(`input[name="llm"][value="${currentSettings.llm}"]`).checked = true;
     cfgTtsVoice.value  = currentSettings.tts_voice  || "alloy";
     cfgLlmModel.value  = currentSettings.llm_model  || "gpt-4o-mini";
-    cfgGroqModel.value = currentSettings.groq_model || "llama-3.3-70b-versatile";
+    cfgGroqModel.value = currentSettings.groq_model || "openai/gpt-oss-20b";
     _updateSubSettings();
     modalEl.classList.remove("hidden");
     cfgApiKey.focus();
