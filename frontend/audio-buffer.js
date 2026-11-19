@@ -123,6 +123,33 @@ class VoiceActivityDetector {
 // WAV encoding
 // ──────────────────────────────────────────────────────────────────────────────
 
+/** Whisper resamples everything to 16 kHz internally — sending more is wasted upload. */
+const STT_SAMPLE_RATE = 16000;
+
+/**
+ * Downsample Float32 PCM to `targetRate` by averaging each source window
+ * (box filter = cheap anti-aliasing, plenty for speech going into Whisper).
+ * Returns the input unchanged if it is already at or below `targetRate`.
+ * @param {Float32Array} samples
+ * @param {number} srcRate
+ * @param {number} [targetRate]
+ * @returns {Float32Array}
+ */
+function downsample(samples, srcRate, targetRate = STT_SAMPLE_RATE) {
+    if (srcRate <= targetRate) return samples;
+    const ratio = srcRate / targetRate;
+    const outLen = Math.floor(samples.length / ratio);
+    const out = new Float32Array(outLen);
+    for (let i = 0; i < outLen; i++) {
+        const start = Math.floor(i * ratio);
+        const end = Math.min(samples.length, Math.floor((i + 1) * ratio));
+        let sum = 0;
+        for (let j = start; j < end; j++) sum += samples[j];
+        out[i] = end > start ? sum / (end - start) : samples[start];
+    }
+    return out;
+}
+
 /**
  * Encode Float32 PCM → WAV ArrayBuffer (16-bit, mono).
  * @param {Float32Array} samples

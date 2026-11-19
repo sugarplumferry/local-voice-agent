@@ -242,7 +242,18 @@ btnStart.addEventListener("click", () => {
 
 async function startRecording() {
     try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        // Request browser DSP explicitly — defaults vary by browser/OS, and
+        // without echo cancellation the agent's own TTS (esp. phone speaker)
+        // leaks back into the VAD and triggers false barge-ins.
+        stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl:  true,
+                channelCount:     1,
+            },
+            video: false,
+        });
     } catch (err) {
         setStatus(`Mic denied: ${err.message}`);
         return;
@@ -413,7 +424,12 @@ function onWorkletMessage({ data }) {
             activeUserEl = appendMsg("user", "");
         }
 
-        const wavBuf = float32ToWav(turnPcm, audioCtx.sampleRate);
+        // turnPcm stays at the native rate (it is re-combined on continuing
+        // turns); only the upload copy is downsampled to 16 kHz.
+        const wavBuf = float32ToWav(
+            downsample(turnPcm, audioCtx.sampleRate),
+            Math.min(audioCtx.sampleRate, STT_SAMPLE_RATE),
+        );
         console.log(`[WS] sending WAV  ${wavBuf.byteLength} bytes`);
         if (ws?.readyState === WebSocket.OPEN) ws.send(wavBuf);
         setStatus("Transcribing…");
