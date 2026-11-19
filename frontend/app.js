@@ -33,7 +33,7 @@ const USER_ID = (() => {
 })();
 
 const VU_BARS       = 24;
-const INTERRUPT_TICKS = 6;   // × ~29 ms per tick ≈ 174 ms sustained speech
+const INTERRUPT_TICKS = 8;   // × ~20 ms per VAD window ≈ 160 ms sustained speech
 const SETTINGS_KEY  = "voice_agent_settings";
 const VOLUME_KEY    = "voice_agent_volume";  // 0–100, persisted across sessions
 
@@ -175,12 +175,14 @@ function _dbFraction(db) {
 }
 
 function updateVu(db) {
+    // Same comparison as the VAD worklet, so "voice" colour == VAD sees voice.
+    const isVoice   = db >= currentThresholdDb;
     const active    = Math.round(_dbFraction(db) * VU_BARS);
     const threshBar = Math.round(_dbFraction(currentThresholdDb) * VU_BARS);
     vuBars.forEach((b, i) => {
-        if (i >= active)         b.style.background = "var(--meter-off)";
-        else if (i >= threshBar) b.style.background = "var(--meter-voice)";
-        else                     b.style.background = "var(--meter-on)";
+        if (i >= active)                    b.style.background = "var(--meter-off)";
+        else if (isVoice && i >= threshBar) b.style.background = "var(--meter-voice)";
+        else                                b.style.background = "var(--meter-on)";
     });
 }
 
@@ -353,7 +355,7 @@ function _sendVoiceState(active) {
 function onWorkletMessage({ data }) {
     if (data.type === "db") {
         updateVu(data.value);
-        if (data.value > currentThresholdDb) {
+        if (data.value >= currentThresholdDb) {
             _lastVoiceTs = Date.now();
             exceedCount++;
             if (exceedCount >= INTERRUPT_TICKS && currentSource) stopCurrentAudio();
