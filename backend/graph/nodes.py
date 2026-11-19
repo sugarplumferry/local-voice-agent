@@ -79,11 +79,15 @@ def _get_llm(config: RunnableConfig, *, temperature: float, num_predict: int | N
             "temperature": temperature,
             "streaming": streaming,
         }
-        if kw["model"].startswith("openai/gpt-oss"):
+        reasoning = kw["model"].startswith("openai/gpt-oss")
+        if reasoning:
             # Reasoning model — keep thinking short; voice latency matters more.
             kw["reasoning_effort"] = "low"
         if num_predict:
-            kw["max_tokens"] = num_predict
+            # max_tokens also counts reasoning tokens on Groq; without headroom
+            # a tight cap (e.g. 20 for fact dedup) is spent on thinking and the
+            # visible answer comes back empty.
+            kw["max_tokens"] = num_predict + (512 if reasoning else 0)
         return ChatGroq(**kw)
 
     # Local Ollama (default)
